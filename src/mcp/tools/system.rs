@@ -65,6 +65,7 @@ impl AutoControl {
 
         Ok(text(format!(
             "MQTT broker：{}（{connected}）\n\
+             本端 client id：{}\n\
              鼠标主题：{}　键盘主题：{}\n\
              虚拟光标（估计值）：({}, {})\n\
              服务端按下的鼠标按钮：{}\n\
@@ -74,8 +75,11 @@ impl AutoControl {
              说明：设备固件只订阅、不发布（无 ACK、无状态主题），\
 所以「已连接」只表示服务端到 broker 的通路正常，不代表设备收到过报文；\
 若设备正在重连（约 10~15 秒窗口），期间的报文会静默丢失。\
-服务端按下的键与按钮同样只是服务端自己的记录，设备上的物理按键不在其中。",
+服务端按下的键与按钮同样只是服务端自己的记录，设备上的物理按键不在其中。\
+若多个实例共用同一 client id，broker 会互相踢掉旧会话，\
+表现为「已连接」在每次查询间跳变——client id 带 PID 后缀即可避免。",
             publisher.broker(),
+            publisher.client_id(),
             publisher.mouse_topic(),
             publisher.keyboard_topic(),
             state.cursor.0,

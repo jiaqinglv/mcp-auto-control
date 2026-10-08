@@ -27,6 +27,7 @@ const RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
 pub struct Publisher {
     client: AsyncClient,
     broker: String,
+    client_id: String,
     mouse_topic: String,
     keyboard_topic: String,
     frame_interval: Duration,
@@ -37,8 +38,12 @@ pub struct Publisher {
 impl Publisher {
     /// 创建发布者与事件循环。调用方必须在后台持续 `drive()` 事件循环，
     /// 否则发布队列会填满、所有工具调用都会挂起。
+    ///
+    /// client id 取 [`Config::resolved_client_id`]：默认带 PID 后缀，避免并行拉起的
+    /// 多个实例因 client id 相同而互相踢下线（见该方法的文档）。
     pub fn new(config: &Config) -> (Self, EventLoop) {
-        let mut options = MqttOptions::new(&config.client_id, &config.broker, config.port);
+        let client_id = config.resolved_client_id();
+        let mut options = MqttOptions::new(&client_id, &config.broker, config.port);
         options.set_keep_alive(Duration::from_secs(30));
         options.set_clean_session(true);
 
@@ -47,6 +52,7 @@ impl Publisher {
         let publisher = Self {
             client,
             broker: format!("{}:{}", config.broker, config.port),
+            client_id,
             mouse_topic: config.mouse_topic.clone(),
             keyboard_topic: config.keyboard_topic.clone(),
             frame_interval: config.frame_interval(),
@@ -58,6 +64,13 @@ impl Publisher {
 
     pub fn broker(&self) -> &str {
         &self.broker
+    }
+
+    /// 本连接实际使用的 MQTT client id（含 PID 后缀）。
+    ///
+    /// 诊断多实例互相踢下线时，这是区分「是哪个进程在占用会话」的关键信息。
+    pub fn client_id(&self) -> &str {
+        &self.client_id
     }
 
     pub fn mouse_topic(&self) -> &str {
@@ -79,11 +92,11 @@ impl Publisher {
             match event_loop.poll().await {
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
                     self.connected.store(true, Ordering::Relaxed);
-                    info!(broker = %self.broker, "已连接 MQTT broker");
+                    info!(broker = %self.broker, client_id = %self.client_id, "已连接 MQTT broker");
                 }
                 Ok(Event::Incoming(Packet::Disconnect)) => {
                     self.connected.store(false, Ordering::Relaxed);
-                    warn!("broker 主动断开连接");
+                    warn!(client_id = %self.client_id, "broker 主动断开连接");
                 }
                 Ok(Event::Outgoing(Outgoing::Disconnect)) => {
                     self.connected.store(false, Ordering::Relaxed);
@@ -91,7 +104,8 @@ impl Publisher {
                 Ok(event) => debug!(?event, "MQTT 事件"),
                 Err(err) => {
                     self.connected.store(false, Ordering::Relaxed);
-                    warn!(%err, broker = %self.broker, "MQTT 连接异常，稍后重试");
+                    warn!(%err, broker = %self.broker, client_id = %self.client_id,
+                          "MQTT 连接异常，稍后重试");
                     tokio::time::sleep(RECONNECT_BACKOFF).await;
                 }
             }

@@ -25,9 +25,24 @@ pub struct Config {
     #[arg(long, env = "MCP_KEYBOARD_TOPIC", default_value = "keyboard/auto")]
     pub keyboard_topic: String,
 
-    /// 本服务端自己的 MQTT client id（不能与设备固件中的常量重复）
+    /// 本服务端 MQTT client id 的前缀（不能与设备固件中的常量重复）
+    ///
+    /// 实际使用的 id 见 [`Config::resolved_client_id`]。
     #[arg(long, env = "MCP_CLIENT_ID", default_value = "mcp-auto-control")]
     pub client_id: String,
+
+    /// 是否在 client id 后附加本进程 PID
+    ///
+    /// MQTT 用 client id 标识会话，重复的 id 会让 broker 踢掉旧会话。本服务常被
+    /// 同时拉起多个实例（MCP 客户端预热池 + 当前会话），此时两个实例会以秒级频率
+    /// 互相顶掉，表现为「连接时好时坏」。默认开启以保证实例间不冲突。
+    #[arg(
+        long,
+        env = "MCP_UNIQUE_ID_SUFFIX",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub unique_id_suffix: bool,
 
     /// 帧间隔（毫秒）。设备侧 MOUSE_CHANNEL 容量为 8，发太快会被丢弃
     #[arg(long, env = "MCP_FRAME_INTERVAL_MS", default_value_t = 10)]
@@ -85,6 +100,19 @@ impl Config {
     pub fn frame_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.frame_interval_ms)
     }
+
+    /// 实际使用的 MQTT client id。
+    ///
+    /// 默认在 [`Config::client_id`] 之后附加本进程 PID，使同一份配置下的多个实例
+    /// 各自持有独立会话。注意此时**不再需要**为多开手工设置 `MCP_CLIENT_ID`，
+    /// 但同一个 PID 重启后会复用同一个 id（这正是期望的：重启即接管自己的旧会话）。
+    pub fn resolved_client_id(&self) -> String {
+        if self.unique_id_suffix {
+            format!("{}-{}", self.client_id, std::process::id())
+        } else {
+            self.client_id.clone()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -105,7 +133,36 @@ mod tests {
         // 必须与固件里的 MQTT_CLIENT_ID（AutoMouse / AutoKeyboard）区分开
         assert_ne!(cfg.client_id, "AutoMouse");
         assert_ne!(cfg.client_id, "AutoKeyboard");
+        assert_ne!(cfg.resolved_client_id(), "AutoMouse");
+        assert_ne!(cfg.resolved_client_id(), "AutoKeyboard");
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn resolved_client_id_is_unique_per_process_by_default() {
+        let cfg = base();
+        assert!(cfg.unique_id_suffix, "默认必须附加 PID 后缀");
+        assert_eq!(
+            cfg.resolved_client_id(),
+            format!("mcp-auto-control-{}", std::process::id())
+        );
+    }
+
+    #[test]
+    fn resolved_client_id_keeps_the_value_when_suffix_is_disabled() {
+        let cfg = Config {
+            unique_id_suffix: false,
+            client_id: "my-fixed-id".to_string(),
+            ..base()
+        };
+        assert_eq!(cfg.resolved_client_id(), "my-fixed-id");
+    }
+
+    #[test]
+    fn unique_id_suffix_is_settable_from_cli() {
+        // 必须是可关的布尔开关：--unique-id-suffix false 应能关闭
+        let cfg = Config::parse_from(["mcp-auto-control", "--unique-id-suffix", "false"]);
+        assert!(!cfg.unique_id_suffix);
     }
 
     #[test]
